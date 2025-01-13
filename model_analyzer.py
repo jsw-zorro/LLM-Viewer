@@ -1,9 +1,18 @@
+"""Model analyzer for LLM performance modeling."""
+
 import os
+import sys
+from typing import Dict, Any, Optional
+
+# Add llm_viewer directory to path for local imports
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, CURRENT_DIR)  # Insert at beginning to ensure local imports take precedence
+
+from utils import str_number, str_number_time
 import importlib
 from hardwares.hardware_params import hardware_params
 from roofline_model import roofline_analyze
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
-from utils import str_number, str_number_time
 import math
 
 ALL_DATA_NAMES = [

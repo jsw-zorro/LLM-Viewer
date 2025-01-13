@@ -8,7 +8,7 @@ import math
 
 # Add parent directory to path to import from token_analysis
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from token_analysis.llm_performance_models import (
+from token_analysis.model_base import (
     LLMPerformanceModel, HardwareSpecs, ModelSpecs, PerformanceEstimate
 )
 

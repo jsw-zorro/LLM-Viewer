@@ -1,4 +1,3 @@
-
 def str_number(num):
     if num > 1e14:
         return f"{num/1e12:.0f}T"
