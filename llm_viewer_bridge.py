@@ -74,15 +74,35 @@ class LLMViewerBridge(LLMPerformanceModel):
         # Use the first sequence length for now since llm_viewer doesn't support varying lengths
         seq_length = seq_lengths[0] if seq_lengths else 512
         
+        #TODO: should consider the variable sequence length problem.
+        
         # Run llm_viewer analysis
-        results = self.analyzer.analyze(
-            seqlen=seq_length,
+        #TODO: verify after the change works or not.
+        # results1 = self.analyzer.analyze_full(
+        #     seqlen=seq_length,
+        #     batchsize=batch_size,
+        #     w_bit=w_bit,
+        #     a_bit=a_bit,
+        #     kv_bit=kv_bit,
+        #     use_flashattention=use_flashattention
+        # )
+        
+        results = self.analyzer.analyze_varying_full(
+            seqlens=seq_lengths,
             batchsize=batch_size,
             w_bit=w_bit,
             a_bit=a_bit,
             kv_bit=kv_bit,
             use_flashattention=use_flashattention
         )
+        
+        # # need to check where results1 differs from results2 and cause the difference.
+        # for stage in ["prefill", "decode"]:
+        #     for layer in results1[stage]:
+        #         if results1[stage][layer] != results[stage][layer]:
+        #             print(f"results1[{stage}][{layer}] = {results1[stage][layer]}")
+        #             print(f"results[{stage}][{layer}] = {results[stage][layer]}")
+        
         
         # Aggregate prefill results
         prefill_ops, prefill_memory, prefill_time, prefill_bound = self._aggregate_results(results, "prefill")

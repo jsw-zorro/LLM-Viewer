@@ -14,7 +14,7 @@ from hardwares.hardware_params import hardware_params
 from roofline_model import roofline_analyze
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 import math
-
+import ipdb
 ALL_DATA_NAMES = [
     "OPs",
     "memory_access",
@@ -75,22 +75,44 @@ class ModelAnalyzer:
     ):
 
         bandwidth, max_OPS, onchip_buffer = self.get_hardware_info()
-        memory_access = load_weight + load_act + store_act + load_kv_cache + store_kv_cache
-        arithmetic_intensity, performance, bound = roofline_analyze(bandwidth, max_OPS, OPs, memory_access)
-        inference_time = OPs / performance
-        self.results[stage][name] = {
-            "OPs": OPs,
-            "memory_access": memory_access,
-            "arithmetic_intensity": arithmetic_intensity,
-            "performance": performance,
-            "bound": bound,
-            "load_weight": load_weight,
-            "load_act": load_act,
-            "store_act": store_act,
-            "load_kv_cache": load_kv_cache,
-            "store_kv_cache": store_kv_cache,
-            "inference_time": inference_time,
-        }
+        if name not in self.results[stage]:
+            memory_access = load_weight + load_act + store_act + load_kv_cache + store_kv_cache
+            arithmetic_intensity, performance, bound = roofline_analyze(bandwidth, max_OPS, OPs, memory_access)
+            inference_time = OPs / performance
+            self.results[stage][name] = {
+                "OPs": OPs,
+                "memory_access": memory_access,
+                "arithmetic_intensity": arithmetic_intensity,
+                "performance": performance,
+                "bound": bound,
+                "load_weight": load_weight,
+                "load_act": load_act,
+                "store_act": store_act,
+                "load_kv_cache": load_kv_cache,
+                "store_kv_cache": store_kv_cache,
+                "inference_time": inference_time,
+            }
+        else:
+            # not first time to deal with it.
+            self.results[stage][name]["OPs"] += OPs
+            self.results[stage][name]["load_act"] += load_act
+            self.results[stage][name]["store_act"] += store_act
+            self.results[stage][name]["load_kv_cache"] += load_kv_cache
+            self.results[stage][name]["store_kv_cache"] += store_kv_cache
+            self.results[stage][name]["memory_access"] = (
+                self.results[stage][name]["load_weight"] + 
+                self.results[stage][name]["load_act"] + 
+                self.results[stage][name]["store_act"] + 
+                self.results[stage][name]["load_kv_cache"] + 
+                self.results[stage][name]["store_kv_cache"]
+            )
+            arithmetic_intensity, performance, bound = roofline_analyze(bandwidth, max_OPS, self.results[stage][name]["OPs"], self.results[stage][name]["memory_access"])
+            self.results[stage][name]["arithmetic_intensity"] = arithmetic_intensity
+            self.results[stage][name]["performance"] = performance
+            self.results[stage][name]["bound"] = bound
+            inference_time = self.results[stage][name]["OPs"] / performance
+            self.results[stage][name]["inference_time"] = inference_time
+            
 
     def save_csv(self, save_path=None):
         if save_path is None:
@@ -123,8 +145,7 @@ class ModelAnalyzer:
                         f"{result['bound']},{str_number(result['load_weight'])}B,{str_number(result['load_act'])}B,{str_number(result['store_act'])}B,{str_number(result['load_kv_cache'])}B,"
                         f"{str_number(result['store_kv_cache'])}B,{str_number_time(result['inference_time'])}s\n"
                     )
-
-    def analyze(
+    def analyze_layers(
         self,
         seqlen,
         batchsize,
@@ -132,7 +153,6 @@ class ModelAnalyzer:
         a_bit=16,
         kv_bit=None,
         use_flashattention=False,
-        kv_token_ratio=1,
         tp_size: int = 1
     ):
         """
@@ -185,7 +205,6 @@ class ModelAnalyzer:
         """
         assert seqlen > 0
         assert batchsize > 0
-        self.results = {"decode": {}, "prefill": {}}
         if kv_bit is None:
             kv_bit = a_bit
         self.w_bit = w_bit
@@ -425,6 +444,29 @@ class ModelAnalyzer:
                 load_kv_cache=0,
                 store_kv_cache=0,
             )
+        
+        
+        
+    def analyze_full(
+        self,
+        seqlen,
+        batchsize,
+        w_bit=16,
+        a_bit=16,
+        kv_bit=None,
+        use_flashattention=False,
+        kv_token_ratio=1,
+        tp_size: int = 1
+    ):
+        
+        self.results = {"decode": {}, "prefill": {}}
+        # analyze per layer statistics
+        self.analyze_layers(seqlen, batchsize, w_bit, a_bit, kv_bit, use_flashattention, tp_size)
+        num_hidden_layers = self.config.get_num_hidden_layers(self.model_params)
+        a_byte = self.a_bit / 8
+        w_byte = self.w_bit / 8
+        kv_byte = self.kv_bit / 8
+        
 
         # compute total
         total_results = {"decode": {}, "prefill": {}}
@@ -478,7 +520,84 @@ class ModelAnalyzer:
 
         self.results["total_results"] = total_results
         return self.results
+    
+    def analyze_varying_full(
+        self,
+        seqlens,
+        batchsize,
+        w_bit=16,
+        a_bit=16,
+        kv_bit=None,
+        use_flashattention = False,
+        kv_token_ratio = 1,
+        tp_size: int = 1
+    ):
+        #The function is used to analyze the performance of 
+        
+        self.results = {"decode": {}, "prefill": {}}
+        
+        # analyze per layer statistics
+        for seqlen in seqlens:
+            self.analyze_layers(seqlen, 1, w_bit, a_bit, kv_bit, use_flashattention, tp_size)
+        num_hidden_layers = self.config.get_num_hidden_layers(self.model_params)
+        a_byte = self.a_bit / 8
+        w_byte = self.w_bit / 8
+        kv_byte = self.kv_bit / 8
+        
 
+        # compute total
+        total_results = {"decode": {}, "prefill": {}}
+        for data_name in ALL_DATA_NAMES:
+            total_results["decode"][data_name] = 0
+            total_results["prefill"][data_name] = 0
+        for stage in ["decode", "prefill"]:
+            for layer_name, result in self.results[stage].items():
+                for data_name in ALL_DATA_NAMES:
+                    total_results[stage][data_name] += result[data_name] * num_hidden_layers
+
+        # memory footprint
+        weight_kv_footprint = total_results["prefill"]["load_weight"] + total_results["prefill"]["store_kv_cache"]
+        decode_tmp_act = 0
+        for layer_name, result in self.results["decode"].items():
+            decode_tmp_act += result["store_act"]
+        total_results["decode"]["memory_consumption"] = decode_tmp_act + weight_kv_footprint
+        total_results["decode"]["memory_consumption_tmp_act"] = decode_tmp_act
+        total_results["decode"]["memory_consumption_weight"] = total_results["prefill"]["load_weight"]
+        total_results["decode"]["memory_consumption_kv_cache"] = total_results["prefill"]["store_kv_cache"]
+        prefill_tmp_act = 0
+        for layer_name, result in self.results["prefill"].items():
+            prefill_tmp_act += result["store_act"]
+        total_results["prefill"]["memory_consumption"] = prefill_tmp_act + weight_kv_footprint
+        total_results["prefill"]["memory_consumption_tmp_act"] = prefill_tmp_act
+        total_results["prefill"]["memory_consumption_weight"] = total_results["prefill"]["load_weight"]
+        total_results["prefill"]["memory_consumption_kv_cache"] = total_results["prefill"]["store_kv_cache"]
+
+        # lm_head
+        name = "lm_head"
+        args = {"batchsize": batchsize, "a_byte": a_byte, "w_byte": w_byte}
+        for layer_info in self.config.post_process(self.model_params, args):
+            self._analyze_to_results(**layer_info)
+            for data_name in ALL_DATA_NAMES:
+                total_results[layer_info["stage"]][data_name] += self.results[layer_info["stage"]][layer_info["name"]][
+                    data_name
+                ]
+        # for stage in ["prefill", "decode"]:
+        #     self._analyze_to_results(
+        #         stage,
+        #         name,
+        #         OPs=batchsize * hidden_size * vocab_size * 1,
+        #         load_weight=hidden_size * vocab_size,
+        #         load_act=hidden_size * a_byte,
+        #         store_act=vocab_size * a_byte,
+        #         load_kv_cache=0,
+        #         store_kv_cache=0,
+        #     )
+        #     for data_name in ALL_DATA_NAMES:
+        #         total_results[stage][data_name] += self.results[stage][name][data_name]
+
+        self.results["total_results"] = total_results
+        return self.results
+    
     def analyze_generate_task(
         self,
         prompt_len,
