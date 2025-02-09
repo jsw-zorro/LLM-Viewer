@@ -14,6 +14,7 @@ from token_analysis.model_base import (
 
 from roofline_model import roofline_analyze
 from model_analyzer import ModelAnalyzer
+import ipdb
 
 @dataclass
 class LayerResults:
@@ -41,24 +42,38 @@ class LLMViewerBridge(LLMPerformanceModel):
             hardware=hardware.name,
             source="huggingface"
         )
+        self.hardware = hardware
         
+    # def _aggregate_results(self, results: Dict[str, Dict[str, Any]], stage: str) -> Tuple[float, float, float, str]:
+    #     """Aggregate layer-wise results into total metrics"""
+    #     total_ops = 0
+    #     total_memory = 0
+    #     total_time = 0
+    #     bound_counts = {"memory": 0, "compute": 0}
+        
+    #     for layer_name, layer_results in results[stage].items():
+    #         total_ops += layer_results["OPs"]
+    #         total_memory += layer_results["memory_access"]
+    #         total_time += layer_results["inference_time"]
+    #         bound_counts[layer_results["bound"]] += 1
+            
+    #     # Determine overall bound
+    #     overall_bound = "Memory" if bound_counts["memory"] > bound_counts["compute"] else "Compute"
+        
+    #     return total_ops, total_memory, total_time, overall_bound
+    
     def _aggregate_results(self, results: Dict[str, Dict[str, Any]], stage: str) -> Tuple[float, float, float, str]:
         """Aggregate layer-wise results into total metrics"""
-        total_ops = 0
-        total_memory = 0
-        total_time = 0
-        bound_counts = {"memory": 0, "compute": 0}
-        
-        for layer_name, layer_results in results[stage].items():
-            total_ops += layer_results["OPs"]
-            total_memory += layer_results["memory_access"]
-            total_time += layer_results["inference_time"]
-            bound_counts[layer_results["bound"]] += 1
-            
-        # Determine overall bound
-        overall_bound = "Memory" if bound_counts["memory"] > bound_counts["compute"] else "Compute"
-        
-        return total_ops, total_memory, total_time, overall_bound
+       
+        OPs = results['total_results'][stage]["OPs"]
+        memory_access = results['total_results'][stage]["memory_access"]
+        total_time = results['total_results'][stage]["inference_time"]
+        bandwidth, max_OPS, onchip_buffer = self.analyzer.get_hardware_info()
+        arithmetic_intensity, performance, bound = roofline_analyze(bandwidth, max_OPS, OPs, memory_access)
+       
+        return OPs, memory_access, total_time, bound
+
+    
     
     def estimate_performance(
         self,
@@ -104,6 +119,8 @@ class LLMViewerBridge(LLMPerformanceModel):
         #             print(f"results[{stage}][{layer}] = {results[stage][layer]}")
         
         
+        # TODO: I think we don't need to do the aggregatio anymore, all the necessary information are in total files.
+
         # Aggregate prefill results
         prefill_ops, prefill_memory, prefill_time, prefill_bound = self._aggregate_results(results, "prefill")
         prefill_tflops = prefill_ops / (prefill_time * 1e12) if prefill_time > 0 else 0
@@ -111,6 +128,7 @@ class LLMViewerBridge(LLMPerformanceModel):
         # Aggregate decode results
         decode_ops, decode_memory, decode_time, decode_bound = self._aggregate_results(results, "decode")
         decode_tflops = decode_ops / (decode_time * 1e12) if decode_time > 0 else 0
+
         
         # Calculate total memory including weights and KV cache
         total_memory = (
@@ -122,22 +140,10 @@ class LLMViewerBridge(LLMPerformanceModel):
             sum(seq_lengths) * batch_size * ((kv_bit or a_bit) / 8)
         ) / 1e9  # Convert to GB
         
-        # Get memory and compute times from roofline analysis
-        _, prefill_performance, _ = roofline_analyze(
-            self.hardware.memory_bandwidth * 1e9,  # Convert to bytes/s
-            self.hardware.tflops * 1e12,  # Convert to OPS/s
-            prefill_ops,
-            prefill_memory
-        )
+  
         prefill_compute_time = prefill_ops / (self.hardware.tflops * 1e12)
         prefill_memory_time = prefill_memory / (self.hardware.memory_bandwidth * 1e9)
-        
-        _, decode_performance, _ = roofline_analyze(
-            self.hardware.memory_bandwidth * 1e9,
-            self.hardware.tflops * 1e12,
-            decode_ops,
-            decode_memory
-        )
+      
         decode_compute_time = decode_ops / (self.hardware.tflops * 1e12)
         decode_memory_time = decode_memory / (self.hardware.memory_bandwidth * 1e9)
         
