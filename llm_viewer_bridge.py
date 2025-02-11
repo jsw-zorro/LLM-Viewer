@@ -82,7 +82,7 @@ class LLMViewerBridge(LLMPerformanceModel):
         w_bit: int = 16,
         a_bit: int = 16,
         kv_bit: Optional[int] = None,
-        use_flashattention: bool = False,
+        use_flashattention: bool = True,
         **kwargs
     ) -> PerformanceEstimate:
         """Estimate performance using llm_viewer's detailed modeling"""
