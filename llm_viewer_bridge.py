@@ -9,7 +9,7 @@ import math
 # Add parent directory to path to import from token_analysis
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from token_analysis.model_base import (
-    LLMPerformanceModel, HardwareSpecs, ModelSpecs, PerformanceEstimate
+    LLMPerformanceModel, HardwareSpecs, ModelSpecs, PerformanceEstimate, UnifiedPerformanceEstimate
 )
 
 from roofline_model import roofline_analyze
@@ -53,6 +53,15 @@ class LLMViewerBridge(LLMPerformanceModel):
         bandwidth, max_OPS, onchip_buffer = self.analyzer.get_hardware_info()
         arithmetic_intensity, performance, bound = roofline_analyze(bandwidth, max_OPS, OPs, memory_access)
        
+        return OPs, memory_access, total_time, bound
+    
+    def _unified_aggregate_results(self, results: Dict[str, Dict[str, Any]]) -> Tuple[float, float, float, str]:
+        """Aggregate layer-wise results into total metrics"""
+        OPs = results['total_results']['OPs']
+        memory_access = results['total_results']['memory_access']
+        total_time = results['total_results']['inference_time']
+        bandwidth, max_OPS, onchip_buffer = self.analyzer.get_hardware_info()
+        arithmetic_intensity, performance, bound = roofline_analyze(bandwidth, max_OPS, OPs, memory_access)
         return OPs, memory_access, total_time, bound
 
     def estimate_performance(
@@ -131,17 +140,17 @@ class LLMViewerBridge(LLMPerformanceModel):
             decode_estimated_latency=decode_time
         ) 
 
-    def estimate_performance_with_type(
+    def unified_estimate_performance(
         self,
-        batch_size: int,
-        seq_lengths: List[int],
-        request_types: List[str],
+        batchsize: int,
         w_bit: int = 16,
         a_bit: int = 16,
         kv_bit: Optional[int] = None,
         use_flashattention: bool = True,
+        previous_tokens: List[int] = None,
+        chunk_sizes: List[int] = None,
         **kwargs
-    ) -> PerformanceEstimate:
+    ) -> UnifiedPerformanceEstimate:
         """
         Estimate performance for mixed prefill and decode operations within the same batch.
         
@@ -151,107 +160,45 @@ class LLMViewerBridge(LLMPerformanceModel):
         
         Args:
             batch_size: The batch size for the request
-            seq_lengths: List of sequence lengths for each request
+            seq_lengths: List of sequence lengths for each request (to-process tokens)
             request_types: List of request types ('1' for prefill, '0' for decode) for each sequence
                            Format example: '1-0-0' means the first sequence is prefill, the next two are decode
             w_bit: Weight precision in bits
             a_bit: Activation precision in bits
             kv_bit: KV cache precision in bits (defaults to a_bit if None)
             use_flashattention: Whether to use Flash Attention for performance modeling
+            previous_tokens: List of previous token counts for each request
+            is_chunked_prefills: String of '1' or '0' indicating which prefill requests use chunking
+                                Format example: '1-0-0' means the first request uses chunked prefill
             
         Returns:
             PerformanceEstimate: Performance estimates for the mixed batch
         """
         # Validate inputs
-        assert len(seq_lengths) == len(request_types.split('-')), "Number of sequence lengths must match number of request types"
+        results = self.analyzer.unified_analyze_varying_full(
+            batchsize=batchsize,
+            w_bit=w_bit,
+            a_bit=a_bit,
+            kv_bit=kv_bit,
+            use_flashattention=use_flashattention,
+            past_lengths=previous_tokens,
+            chunk_sizes=chunk_sizes
+        )
+    
+        OPs, memory_access, total_time, bound = self._unified_aggregate_results(results)
+        tflops = OPs / (total_time * 1e12) if total_time > 0 else 0
         
-        # Split sequences by request type
-        prefill_seq_lengths = []
-        decode_seq_lengths = []
+          
         
-        for seq_len, req_type in zip(seq_lengths, request_types.split('-')):
-            if req_type == '1':  # Prefill
-                prefill_seq_lengths.append(seq_len)
-            elif req_type == '0':  # Decode
-                decode_seq_lengths.append(seq_len)
-            else:
-                raise ValueError(f"Invalid request type: {req_type}. Must be '0' (decode) or '1' (prefill)")
-        
-        # Initialize results
-        prefill_ops = 0
-        prefill_memory = 0
-        prefill_time = 0
-        prefill_bound = ""
-        
-        decode_ops = 0
-        decode_memory = 0
-        decode_time = 0
-        decode_bound = ""
-        
-        # Analyze prefill sequences if any
-        if prefill_seq_lengths:
-            prefill_results = self.analyzer.analyze_varying_full_with_type(
-                seqlens=prefill_seq_lengths,
-                batchsize=len(prefill_seq_lengths),  # Use the number of prefill sequences as batch size
-                op_type=1,  # 1 for prefill
-                w_bit=w_bit,
-                a_bit=a_bit,
-                kv_bit=kv_bit,
-                use_flashattention=use_flashattention
-            )
-            
-            prefill_ops, prefill_memory, prefill_time, prefill_bound = self._aggregate_results(prefill_results, "prefill")
-        
-        # Analyze decode sequences if any
-        if decode_seq_lengths:
-            decode_results = self.analyzer.analyze_varying_full_with_type(
-                seqlens=decode_seq_lengths,
-                batchsize=len(decode_seq_lengths),  # Use the number of decode sequences as batch size
-                op_type=0,  # 0 for decode
-                w_bit=w_bit,
-                a_bit=a_bit,
-                kv_bit=kv_bit,
-                use_flashattention=use_flashattention
-            )
-            
-            decode_ops, decode_memory, decode_time, decode_bound = self._aggregate_results(decode_results, "decode")
-        
-        # Calculate TFLOPS
-        prefill_tflops = prefill_ops / (prefill_time * 1e12) if prefill_time > 0 else 0
-        decode_tflops = decode_ops / (decode_time * 1e12) if decode_time > 0 else 0
-        
-        # Calculate total memory including weights and KV cache
-        total_memory = (
-            # Model weights
-            (12 * self.model.n_layers * self.model.d_model**2 + 
-             2 * self.model.d_model * self.model.vocab_size) * (w_bit / 8) +
-            # KV cache
-            2 * 2 * self.model.n_layers * self.model.n_heads * self.model.d_head * 
-            sum(seq_lengths) * ((kv_bit or a_bit) / 8)
-        ) / 1e9  # Convert to GB
-        
-        # Calculate compute and memory times
-        prefill_compute_time = prefill_ops / (self.hardware.tflops * 1e12) if prefill_ops > 0 else 0
-        prefill_memory_time = prefill_memory / (self.hardware.memory_bandwidth * 1e9) if prefill_memory > 0 else 0
-        
-        decode_compute_time = decode_ops / (self.hardware.tflops * 1e12) if decode_ops > 0 else 0
-        decode_memory_time = decode_memory / (self.hardware.memory_bandwidth * 1e9) if decode_memory > 0 else 0
-        
-        # Return combined performance estimate
-        return PerformanceEstimate(
+        return UnifiedPerformanceEstimate(
             model_name=self.model.name,
             gpu_name=self.hardware.name,
             parameters_b=(12 * self.model.n_layers * self.model.d_model**2 + 
                         2 * self.model.d_model * self.model.vocab_size) / 1e9,
-            prefill_tflops=prefill_tflops,
-            decode_tflops=decode_tflops,
-            total_memory_gb=total_memory,
-            prefill_bound=prefill_bound,
-            decode_bound=decode_bound,
-            prefill_memory_time=prefill_memory_time,
-            decode_memory_time=decode_memory_time,
-            prefill_compute_time=prefill_compute_time,
-            decode_compute_time=decode_compute_time,
-            prefill_estimated_latency=prefill_time,
-            decode_estimated_latency=decode_time
-        ) 
+            tflops=tflops,
+            memory_access=memory_access,
+            total_time=total_time,
+            bound=bound
+        )
+            
+            
