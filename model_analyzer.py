@@ -594,6 +594,7 @@ class ModelAnalyzer:
         w_byte = self.w_bit / 8
         kv_byte = self.kv_bit / 8
         
+  
 
         # compute total
         total_results = {"decode": {}, "prefill": {}}
@@ -622,6 +623,9 @@ class ModelAnalyzer:
         total_results["prefill"]["memory_consumption_weight"] = total_results["prefill"]["load_weight"]
         total_results["prefill"]["memory_consumption_kv_cache"] = total_results["prefill"]["store_kv_cache"]
 
+
+        # print("analyze_varying_full total results: ", self.results)
+
         # lm_head
         name = "lm_head"
         args = {"batchsize": batchsize, "a_byte": a_byte, "w_byte": w_byte}
@@ -646,6 +650,8 @@ class ModelAnalyzer:
         #         total_results[stage][data_name] += self.results[stage][name][data_name]
 
         self.results["total_results"] = total_results
+        
+        print("analyze_varying_full total results: ", self.results["total_results"])
         return self.results
     
     def analyze_generate_task(
@@ -784,14 +790,14 @@ class ModelAnalyzer:
             n_blocks_r = math.ceil(query_len / block_size_r)
             
             q_numel = query_len * head_size * batchsize * num_attention_heads * a_byte
-            o_numel = query_len * head_size * batchsize * num_attention_heads * a_byte  # Corrected output size
-            
+            # o_numel = query_len * head_size * batchsize * num_attention_heads * a_byte  # Corrected output size
+            o_numel = query_len * effective_seqlen * batchsize * num_attention_heads * a_byte
             self._unified_analyze_to_results(
                 "fused_attention",
                 OPs=qk_matmul_OPs + sv_matmul_OPs + softmax_OPs,
                 load_weight=0,
                 load_act=q_numel,
-                store_act=o_numel,  # Output only
+                store_act=o_numel * 2,  # Output only
                 load_kv_cache=n_blocks_r * effective_seqlen * head_size * batchsize * num_key_value_heads * kv_byte * 2,
                 store_kv_cache=0,
             )
@@ -915,18 +921,14 @@ class ModelAnalyzer:
             self.unified_analyze_layers(
                 1, w_bit, a_bit, kv_bit, use_flashattention, past_length, chunk_size, tp_size
             )
-            
+        
+        # print("unified_analyze_varying_full results: ", self.results)
         a_byte = self.a_bit / 8
         w_byte = self.w_bit / 8
         kv_byte = self.kv_bit / 8    
         num_hidden_layers = self.config.get_num_hidden_layers(self.model_params)
         
-        #lm head analysis
-        name = "lm_head"
-        args = {"batchsize": batchsize, "a_byte": a_byte, "w_byte": w_byte}
-        for layer_info in self.config.unified_post_process(self.model_params, args):
-            self._unified_analyze_to_results(**layer_info)
-            
+
             
          # compute total
         total_results = {}
@@ -936,10 +938,20 @@ class ModelAnalyzer:
         for layer_name, result in self.results.items():
             for data_name in ALL_DATA_NAMES:
                 total_results[data_name] += result[data_name] * num_hidden_layers
+        
+        # print("unified_analyze_varying_full total results: ", total_results)
+        
+        #lm head analysis
+        name = "lm_head"
+        args = {"batchsize": batchsize, "a_byte": a_byte, "w_byte": w_byte}
+        for layer_info in self.config.unified_post_process(self.model_params, args):
+            self._unified_analyze_to_results(**layer_info)
+            for data_name in ALL_DATA_NAMES:
+                total_results[data_name] += self.results[layer_info["name"]][data_name]
 
        
         self.results['total_results'] = total_results
 
-          
+        print("unified_analyze_varying_full total results: ", self.results["total_results"])
                 
         return self.results

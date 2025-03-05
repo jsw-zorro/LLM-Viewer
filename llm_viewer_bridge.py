@@ -12,8 +12,8 @@ from token_analysis.model_base import (
     LLMPerformanceModel, HardwareSpecs, ModelSpecs, PerformanceEstimate, UnifiedPerformanceEstimate
 )
 
-from roofline_model import roofline_analyze
-from model_analyzer import ModelAnalyzer
+from .roofline_model import roofline_analyze
+from .model_analyzer import ModelAnalyzer
 import ipdb
 
 @dataclass
